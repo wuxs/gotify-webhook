@@ -1,0 +1,34 @@
+language: go
+go:
+  - "1.21"
+
+services:
+  - docker
+
+notifications:
+  email: false
+
+env:
+  - GO111MODULE=on GOTIFY_VERSIONS="v2.4.0"
+
+before_install:
+  - make download-tools
+  - go get -d
+
+script:
+  - go test ./...
+
+before_deploy:
+  - >
+    for TARGET in $GOTIFY_VERSIONS; do
+      make GOTIFY_VERSION="$TARGET" FILE_SUFFIX="-for-gotify-$TARGET" build;
+    done
+
+deploy:
+  - provider: releases
+    api_key: $GH_TOKEN
+    file_glob: true
+    file: build/*.so
+    skip_cleanup: true
+    on:
+      tags: true
