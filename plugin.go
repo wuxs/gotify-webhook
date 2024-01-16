@@ -18,11 +18,11 @@ import (
 // GetGotifyPluginInfo returns gotify plugin info.
 func GetGotifyPluginInfo() plugin.Info {
 	return plugin.Info{
-		ModulePath:  "github.com/wuxs/multi-notify",
+		ModulePath:  "github.com/wuxs/gotify-webhook",
 		Author:      "wuxs",
 		Version:     "0.1.0",
-		Description: "forward message to more notify server",
-		Name:        "multi-notifier",
+		Description: "forward message to others webhook server",
+		Name:        "gotify-webhook",
 	}
 }
 
@@ -47,21 +47,12 @@ func (p *MultiNotifierPlugin) TestSocket(serverUrl string) (err error) {
 func (p *MultiNotifierPlugin) Enable() error {
 	if len(p.config.HostServer) < 1 {
 		return errors.New("please enter the correct web server")
-	} else {
-		if len(p.config.ClientToken) < 1 {
-			return errors.New("please add the client token first")
-		}
-		serverUrl := p.config.HostServer + "/stream?token=" + p.config.ClientToken
-		err := p.TestSocket(serverUrl)
-		if err != nil {
-			return errors.New("web server url is not valid, either client_token or url is not valid")
-		}
 	}
 
 	log.Println("echo plugin enabled")
 	serverUrl := p.config.HostServer + "/stream?token=" + p.config.ClientToken
 	log.Println("Websocket url : ", serverUrl)
-	go p.ReadMessages(serverUrl)
+	go p.ReceiveMessages(serverUrl)
 	return nil
 }
 
@@ -176,12 +167,22 @@ func (p *MultiNotifierPlugin) SendMessage(msg plugin.Message, webhooks []*WebHoo
 	return
 }
 
-func (p *MultiNotifierPlugin) ReadMessages(serverUrl string) (err error) {
+func (p *MultiNotifierPlugin) ReceiveMessages(serverUrl string) {
+	for {
+		err := p.receiveMessages(serverUrl)
+		if err != nil {
+			log.Println("read message error, retry after 1s")
+		}
+		time.Sleep(1 * time.Second)
+	}
+}
+
+func (p *MultiNotifierPlugin) receiveMessages(serverUrl string) (err error) {
 	interrupt := make(chan os.Signal, 1)
 	signal.Notify(interrupt, os.Interrupt)
 	conn, _, err := websocket.DefaultDialer.Dial(serverUrl, nil)
 	if err != nil {
-		log.Fatal("Dial error : ", err)
+		log.Println("Dial error : ", err)
 		return err
 	}
 	log.Printf("Connected to %s", serverUrl)
@@ -193,14 +194,13 @@ func (p *MultiNotifierPlugin) ReadMessages(serverUrl string) (err error) {
 		for {
 			_, message, err := conn.ReadMessage()
 			if err != nil {
-				log.Fatal("Websocket read message error :", err)
+				log.Println("Websocket read message error :", err)
 				return
 			}
 			if err := json.Unmarshal(message, &msg); err != nil {
-				log.Fatal("Json Unmarshal error :", err)
+				log.Println("Json Unmarshal error :", err)
 				return
 			}
-			//send email
 			err = p.SendMessage(msg, p.config.WebHooks)
 			if err != nil {
 				log.Printf("Email error : %v ", err)
@@ -220,13 +220,9 @@ func (p *MultiNotifierPlugin) ReadMessages(serverUrl string) (err error) {
 			if err != nil {
 				log.Println("write:", err)
 				return err
-				//log.Fatal("Websocket write message error :", err)
 			}
 		case <-interrupt:
 			log.Println("interrupt")
-
-			// Cleanly close the connection by sending a close message and then
-			// waiting (with timeout) for the server to close the connection.
 			err := conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
 			if err != nil {
 				log.Println("write close:", err)
@@ -239,7 +235,6 @@ func (p *MultiNotifierPlugin) ReadMessages(serverUrl string) (err error) {
 			return err
 		}
 	}
-
 }
 
 // NewGotifyPluginInstance creates a plugin instance for a user context.

@@ -1,4 +1,4 @@
-module github.com/wuxs/multi-notify
+module github.com/wuxs/gotify-webhook
 
 go 1.18
 
@@ -6,6 +6,8 @@ require (
 	github.com/gorilla/websocket v1.5.0
 	github.com/gotify/plugin-api v1.0.0
 )
+
+require github.com/stretchr/testify v1.8.4 // indirect
 
 require (
 	github.com/bytedance/sonic v1.9.1 // indirect
