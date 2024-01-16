@@ -32,6 +32,7 @@ type MultiNotifierPlugin struct {
 	storageHandler plugin.StorageHandler
 	config         *Config
 	basePath       string
+	done           chan struct{}
 }
 
 func (p *MultiNotifierPlugin) TestSocket(serverUrl string) (err error) {
@@ -48,7 +49,7 @@ func (p *MultiNotifierPlugin) Enable() error {
 	if len(p.config.HostServer) < 1 {
 		return errors.New("please enter the correct web server")
 	}
-
+	p.done = make(chan struct{})
 	log.Println("echo plugin enabled")
 	serverUrl := p.config.HostServer + "/stream?token=" + p.config.ClientToken
 	log.Println("Websocket url : ", serverUrl)
@@ -59,6 +60,7 @@ func (p *MultiNotifierPlugin) Enable() error {
 // Disable disables the plugin.
 func (p *MultiNotifierPlugin) Disable() error {
 	log.Println("echo plugin disbled")
+	close(p.done)
 	return nil
 }
 
@@ -168,12 +170,11 @@ func (p *MultiNotifierPlugin) SendMessage(msg plugin.Message, webhooks []*WebHoo
 }
 
 func (p *MultiNotifierPlugin) ReceiveMessages(serverUrl string) {
-	for {
-		err := p.receiveMessages(serverUrl)
-		if err != nil {
-			log.Println("read message error, retry after 1s")
-		}
-		time.Sleep(1 * time.Second)
+	time.Sleep(1 * time.Second)
+
+	err := p.receiveMessages(serverUrl)
+	if err != nil {
+		log.Println("read message error, retry after 1s")
 	}
 }
 
@@ -187,23 +188,25 @@ func (p *MultiNotifierPlugin) receiveMessages(serverUrl string) (err error) {
 	}
 	log.Printf("Connected to %s", serverUrl)
 	defer conn.Close()
-	done := make(chan struct{})
 	msg := plugin.Message{}
 	go func() {
-		defer close(done)
 		for {
 			_, message, err := conn.ReadMessage()
 			if err != nil {
 				log.Println("Websocket read message error :", err)
 				return
 			}
-			if err := json.Unmarshal(message, &msg); err != nil {
-				log.Println("Json Unmarshal error :", err)
-				return
-			}
-			err = p.SendMessage(msg, p.config.WebHooks)
-			if err != nil {
-				log.Printf("Email error : %v ", err)
+			if message[0] == '{' {
+				if err := json.Unmarshal(message, &msg); err != nil {
+					log.Println("Json Unmarshal error :", err)
+					continue
+				}
+				err = p.SendMessage(msg, p.config.WebHooks)
+				if err != nil {
+					log.Printf("Email error : %v ", err)
+				}
+			} else {
+				log.Println("unsupported message format")
 			}
 		}
 	}()
@@ -213,7 +216,8 @@ func (p *MultiNotifierPlugin) receiveMessages(serverUrl string) (err error) {
 
 	for {
 		select {
-		case <-done:
+		case <-p.done:
+			log.Println("plugin stopped")
 			return
 		case t := <-ticker.C:
 			err := conn.WriteMessage(websocket.TextMessage, []byte(t.String()))
@@ -221,17 +225,15 @@ func (p *MultiNotifierPlugin) receiveMessages(serverUrl string) (err error) {
 				log.Println("write:", err)
 				return err
 			}
+			ticker.Reset(time.Second)
 		case <-interrupt:
-			log.Println("interrupt")
+			log.Println("plugin interrupt")
 			err := conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
 			if err != nil {
 				log.Println("write close:", err)
 				return err
 			}
-			select {
-			case <-done:
-			case <-time.After(time.Second):
-			}
+			_ = conn.Close()
 			return err
 		}
 	}
