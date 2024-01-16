@@ -22,7 +22,7 @@ func GetGotifyPluginInfo() plugin.Info {
 		Author:      "wuxs",
 		Version:     "0.1.0",
 		Description: "forward message to others webhook server",
-		Name:        "gotify-webhook",
+		Name:        "WebHook",
 	}
 }
 
