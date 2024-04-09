@@ -84,6 +84,7 @@ type WebHook struct {
 	Method string            `yaml:"method"`
 	Body   string            `yaml:"body"`
 	Header map[string]string `yaml:"header"`
+	Tags   []string          `yaml:"tags"`
 }
 
 // Config defines the plugin config scheme
@@ -133,6 +134,24 @@ func (p *MultiNotifierPlugin) GetDisplay(location *url.URL) string {
 
 func (p *MultiNotifierPlugin) SendMessage(msg plugin.Message, webhooks []*WebHook) (err error) {
 	for _, webhook := range webhooks {
+		var msgTag = ""
+		var matchTag = false
+		if val, ok := msg.Extras["tag"]; ok {
+			msgTag = val.(string)
+		}
+		for _, tag := range webhook.Tags {
+			if msgTag != "" && msgTag == tag {
+				matchTag = true
+				break
+			}
+		}
+		if !matchTag {
+			log.Printf("tag dont match, skip")
+			return nil
+		}
+		if webhook.Url == "" {
+			return errors.New("webhook url is empty")
+		}
 		if webhook.Method == "" {
 			webhook.Method = "POST"
 		}
