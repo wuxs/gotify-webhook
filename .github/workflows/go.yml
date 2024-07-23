@@ -30,5 +30,9 @@ jobs:
     - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
-        name: multi-notifier
-        path: build/webhook-*
+        name: webhook-linux-amd64.so
+        path: |
+          build/webhook-linux-amd64.so
+          build/webhook-linux-arm-7.so
+          build/webhook-linux-arm64.so
+          
