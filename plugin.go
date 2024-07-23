@@ -119,8 +119,8 @@ func (p *MultiNotifierPlugin) GetDisplay(location *url.URL) string {
 	3. 填写需要接受通知的 webhook 配置
 
 	webhook 示例:
-	web_hooks: 
-	  - url: http://192.168.1.2:10201/api/sendTextMsg	
+	web_hooks:
+	  - url: http://192.168.1.2:10201/api/sendTextMsg
 		method: POST
 		body: "{\"wxid\":\"xxxxxxxx\",\"msg\":\"$title\n$message\"}"
 	  - url: "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxxxxx"
@@ -132,59 +132,56 @@ func (p *MultiNotifierPlugin) GetDisplay(location *url.URL) string {
 	return message
 }
 
-func (p *MultiNotifierPlugin) SendMessage(msg plugin.Message, webhooks []*WebHook) (err error) {
-	for _, webhook := range webhooks {
-		var msgTag = ""
-		var matchTag = false
-		if val, ok := msg.Extras["tag"]; ok {
-			msgTag = val.(string)
-		}
-		for _, tag := range webhook.Tags {
-			if msgTag != "" && msgTag == tag {
-				matchTag = true
-				break
-			}
-		}
-		if !matchTag {
-			log.Printf("tag dont match, skip")
-			return nil
-		}
-		if webhook.Url == "" {
-			return errors.New("webhook url is empty")
-		}
-		if webhook.Method == "" {
-			webhook.Method = "POST"
-		}
-		if webhook.Header == nil {
-			webhook.Header = map[string]string{
-				"Content-Type": "application/json",
-			}
-		}
-		if webhook.Body == "" {
-			webhook.Body = "{\"msg\":\"$title\n$message\"}"
-		}
-		body := webhook.Body
-		body = strings.Replace(body, "$title", msg.Title, -1)
-		body = strings.Replace(body, "$message", msg.Message, -1)
-		log.Printf("webhook body : %s", body)
-		payload := strings.NewReader(body)
-		req, err := http.NewRequest(webhook.Method, webhook.Url, payload)
-		if err != nil {
-			log.Printf("NewRequest error : %v ", err)
-			return err
-		}
-		for k, v := range webhook.Header {
-			req.Header.Add(k, v)
-		}
-		res, err := http.DefaultClient.Do(req)
-		if err != nil {
-			log.Printf("Do request error : %v ", err)
-			return err
-		}
-		defer res.Body.Close()
-		log.Printf("webhook response : %v ", res)
-	}
-
+func (p *MultiNotifierPlugin) SendMessage(msg plugin.Message, webhook *WebHook) (err error) {
+    var msgTag = ""
+    var matchTag = false
+    if val, ok := msg.Extras["tag"]; ok {
+        msgTag = val.(string)
+    }
+    for _, tag := range webhook.Tags {
+        if msgTag != "" && msgTag == tag {
+            matchTag = true
+            break
+        }
+    }
+    if !matchTag {
+        log.Printf("tag dont match, skip")
+        return nil
+    }
+    if webhook.Url == "" {
+        return errors.New("webhook url is empty")
+    }
+    if webhook.Method == "" {
+        webhook.Method = "POST"
+    }
+    if webhook.Header == nil {
+        webhook.Header = map[string]string{
+            "Content-Type": "application/json",
+        }
+    }
+    if webhook.Body == "" {
+        webhook.Body = "{\"msg\":\"$title\n$message\"}"
+    }
+    body := webhook.Body
+    body = strings.Replace(body, "$title", msg.Title, -1)
+    body = strings.Replace(body, "$message", msg.Message, -1)
+    log.Printf("webhook body : %s", body)
+    payload := strings.NewReader(body)
+    req, err := http.NewRequest(webhook.Method, webhook.Url, payload)
+    if err != nil {
+        log.Printf("NewRequest error : %v ", err)
+        return err
+    }
+    for k, v := range webhook.Header {
+        req.Header.Add(k, v)
+    }
+    res, err := http.DefaultClient.Do(req)
+    if err != nil {
+        log.Printf("Do request error : %v ", err)
+        return err
+    }
+    defer res.Body.Close()
+    log.Printf("webhook response : %v ", res)
 	return
 }
 
@@ -220,9 +217,11 @@ func (p *MultiNotifierPlugin) receiveMessages(serverUrl string) (err error) {
 					log.Println("Json Unmarshal error :", err)
 					continue
 				}
-				err = p.SendMessage(msg, p.config.WebHooks)
-				if err != nil {
-					log.Printf("Email error : %v ", err)
+				for _, webhook := range p.config.WebHooks {
+                    err = p.SendMessage(msg, webhook)
+                    if err != nil {
+                        log.Printf("SendMessage error : %v ", err)
+                    }
 				}
 			} else {
 				log.Println("unsupported message format")
