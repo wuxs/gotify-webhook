@@ -25,7 +25,7 @@ jobs:
       run: make download-tools
 
     - name: build
-      run: make GOTIFY_VERSION="v2.4.0" build
+      run: make GOTIFY_VERSION="v2.5.0" build
 
     - name: Upload artifact
       uses: actions/upload-artifact@v4
