@@ -91,6 +91,7 @@ type WebHook struct {
 type Config struct {
 	ClientToken string     `yaml:"client_token" validate:"required"`
 	HostServer  string     `yaml:"host_server" validate:"required"`
+	Debug  		bool       `yaml:"debug" validate:"required"`
 	WebHooks    []*WebHook `yaml:"web_hooks"`
 }
 
@@ -99,6 +100,7 @@ func (p *MultiNotifierPlugin) DefaultConfig() interface{} {
 	c := &Config{
 		ClientToken: "CrMo3UaAQG1H37G",
 		HostServer:  "ws://localhost",
+		Debug: false
 	}
 	return c
 }
@@ -138,7 +140,13 @@ func (p *MultiNotifierPlugin) SendMessage(msg plugin.Message, webhook *WebHook) 
     if val, ok := msg.Extras["tag"]; ok {
         msgTag = val.(string)
     }
+	if p.config.Debug {
+		log.Printf("msgTag : %v", msgTag)
+	}
     for _, tag := range webhook.Tags {
+		if p.config.Debug {
+			log.Printf("tag : %v", tag)
+		}
         if msgTag != "" && msgTag == tag {
             matchTag = true
             break
@@ -213,6 +221,9 @@ func (p *MultiNotifierPlugin) receiveMessages(serverUrl string) (err error) {
 				return
 			}
 			if message[0] == '{' {
+				if p.config.Debug {
+					log.Println("Websocket read message :", message)
+				}
 				if err := json.Unmarshal(message, &msg); err != nil {
 					log.Println("Json Unmarshal error :", err)
 					continue
