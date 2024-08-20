@@ -138,19 +138,25 @@ func (p *MultiNotifierPlugin) SendMessage(msg plugin.Message, webhooks []*WebHoo
 		var matchTag = false
 		if val, ok := msg.Extras["tag"]; ok {
 			msgTag = val.(string)
-		}
-		for _, tag := range webhook.Tags {
-			if msgTag != "" && msgTag == tag {
-				matchTag = true
+			for _, tag := range webhook.Tags {
+				if msgTag != "" && msgTag == tag {
+					matchTag = true
+					break
+				}
+			}
+			if !matchTag {
+				log.Printf("tag dont match, skip")
+				break
+			}
+		} else {
+			if len(webhook.Tags) > 0 {
+				log.Printf("tag not set, skip")
 				break
 			}
 		}
-		if !matchTag {
-			log.Printf("tag dont match, skip")
-			return nil
-		}
 		if webhook.Url == "" {
-			return errors.New("webhook url is empty")
+			log.Printf("webhook url is empty")
+			break
 		}
 		if webhook.Method == "" {
 			webhook.Method = "POST"
@@ -171,7 +177,7 @@ func (p *MultiNotifierPlugin) SendMessage(msg plugin.Message, webhooks []*WebHoo
 		req, err := http.NewRequest(webhook.Method, webhook.Url, payload)
 		if err != nil {
 			log.Printf("NewRequest error : %v ", err)
-			return err
+			break
 		}
 		for k, v := range webhook.Header {
 			req.Header.Add(k, v)
@@ -179,13 +185,13 @@ func (p *MultiNotifierPlugin) SendMessage(msg plugin.Message, webhooks []*WebHoo
 		res, err := http.DefaultClient.Do(req)
 		if err != nil {
 			log.Printf("Do request error : %v ", err)
-			return err
+			break
 		}
 		defer res.Body.Close()
 		log.Printf("webhook response : %v ", res)
 	}
 
-	return
+	return nil
 }
 
 func (p *MultiNotifierPlugin) ReceiveMessages(serverUrl string) {
