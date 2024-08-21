@@ -3,11 +3,12 @@ package main
 import (
 	"encoding/json"
 	"errors"
-	"log"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
 	"os/signal"
+	"slices"
 	"strings"
 	"time"
 
@@ -31,14 +32,13 @@ type MultiNotifierPlugin struct {
 	msgHandler     plugin.MessageHandler
 	storageHandler plugin.StorageHandler
 	config         *Config
-	basePath       string
 	done           chan struct{}
 }
 
 func (p *MultiNotifierPlugin) TestSocket(serverUrl string) (err error) {
 	_, _, err = websocket.DefaultDialer.Dial(serverUrl, nil)
 	if err != nil {
-		log.Println("Test dial error : ", err)
+		slog.Error("Test dial error :", slog.Any("error", err), slog.Any("url", serverUrl))
 		return err
 	}
 	return nil
@@ -50,16 +50,16 @@ func (p *MultiNotifierPlugin) Enable() error {
 		return errors.New("please enter the correct web server")
 	}
 	p.done = make(chan struct{})
-	log.Println("echo plugin enabled")
+	slog.Info("webhook plugin enabled", slog.Any("config", GetGotifyPluginInfo()))
 	serverUrl := p.config.HostServer + "/stream?token=" + p.config.ClientToken
-	log.Println("Websocket url : ", serverUrl)
+	slog.Info("Websocket url :" + serverUrl)
 	go p.ReceiveMessages(serverUrl)
 	return nil
 }
 
 // Disable disables the plugin.
 func (p *MultiNotifierPlugin) Disable() error {
-	log.Println("echo plugin disbled")
+	slog.Info("webhook plugin disbled", slog.Any("config", GetGotifyPluginInfo()))
 	close(p.done)
 	return nil
 }
@@ -79,10 +79,16 @@ type Storage struct {
 	CalledTimes int `json:"called_times"`
 }
 
+type Body struct {
+	Text  string `json:"text"`
+	Image string `json:"image"`
+	File  string `json:"file"`
+}
+
 type WebHook struct {
 	Url    string            `yaml:"url"`
 	Method string            `yaml:"method"`
-	Body   string            `yaml:"body"`
+	Body   *Body             `yaml:"body"`
 	Header map[string]string `yaml:"header"`
 	Tags   []string          `yaml:"tags"`
 }
@@ -106,6 +112,19 @@ func (p *MultiNotifierPlugin) DefaultConfig() interface{} {
 // ValidateAndSetConfig implements plugin.Configurer
 func (p *MultiNotifierPlugin) ValidateAndSetConfig(config interface{}) error {
 	p.config = config.(*Config)
+	for i, webhook := range p.config.WebHooks {
+		if webhook.Method == "" {
+			webhook.Method = "POST"
+		}
+		if webhook.Url == "" {
+			slog.Warn("webhook url is empty", slog.Any("webhook", webhook))
+			p.config.WebHooks = append(p.config.WebHooks[:i], p.config.WebHooks[i+1:]...)
+		}
+		if webhook.Body == nil {
+			slog.Warn("webhook body is invalid", slog.Any("webhook", webhook))
+			p.config.WebHooks = append(p.config.WebHooks[:i], p.config.WebHooks[i+1:]...)
+		}
+	}
 	return nil
 }
 
@@ -122,10 +141,13 @@ func (p *MultiNotifierPlugin) GetDisplay(location *url.URL) string {
 	web_hooks: 
 	  - url: http://192.168.1.2:10201/api/sendTextMsg	
 		method: POST
-		body: "{\"wxid\":\"xxxxxxxx\",\"msg\":\"$title\n$message\"}"
+		body: 
+		  text: "{\"wxid\":\"xxxxxxxx\",\"msg\":\"$title\n$message\"}"
 	  - url: "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxxxxx"
 		method: "POST"
-		body: "{\"msgtype\":\"text\",\"text\":{\"content\":\"$title\n$message\"}}"
+		body: 
+		  text: "{\"msgtype\":\"text\",\"text\":{\"content\":\"$title\n$message\"}}"
+		  image: "$message"
 
 	注：请在更改后重新启用插件。
 	`
@@ -133,62 +155,54 @@ func (p *MultiNotifierPlugin) GetDisplay(location *url.URL) string {
 }
 
 func (p *MultiNotifierPlugin) SendMessage(msg plugin.Message, webhooks []*WebHook) (err error) {
+	var msgTag = ""
+	var msgType = ""
+	if val, ok := msg.Extras["tag"]; ok {
+		msgTag = val.(string)
+	}
+	if val, ok := msg.Extras["type"]; ok {
+		msgType = val.(string)
+	}
 	for _, webhook := range webhooks {
-		var msgTag = ""
-		var matchTag = false
-		if val, ok := msg.Extras["tag"]; ok {
-			msgTag = val.(string)
-			for _, tag := range webhook.Tags {
-				if msgTag != "" && msgTag == tag {
-					matchTag = true
-					break
-				}
+		if len(webhook.Tags) > 0 {
+			if msgTag != "" && !slices.Contains(webhook.Tags, msgTag) {
+				slog.Warn("webhook dont match tag, skip", slog.Any("msgTag", msgTag), slog.Any("webhookTag", webhook.Tags))
+				continue
 			}
-			if !matchTag {
-				log.Printf("tag dont match, skip")
-				break
-			}
-		} else {
-			if len(webhook.Tags) > 0 {
-				log.Printf("tag not set, skip")
-				break
-			}
+		} else if msgTag != "" {
+			slog.Warn("msg tag dont match , skip", slog.Any("msgTag", msgTag), slog.Any("webhookTag", webhook.Tags))
+			continue
 		}
-		if webhook.Url == "" {
-			log.Printf("webhook url is empty")
-			break
+		body := webhook.Body.Text
+		switch msgType {
+		case "text":
+			body = webhook.Body.Text
+		case "image":
+			body = webhook.Body.Image
+		case "file":
+			body = webhook.Body.File
+		default:
+			slog.Warn("msg type dont match , skip", slog.Any("msgType", msgType), slog.Any("webhookType", webhook.Tags))
 		}
-		if webhook.Method == "" {
-			webhook.Method = "POST"
-		}
-		if webhook.Header == nil {
-			webhook.Header = map[string]string{
-				"Content-Type": "application/json",
-			}
-		}
-		if webhook.Body == "" {
-			webhook.Body = "{\"msg\":\"$title\n$message\"}"
-		}
-		body := webhook.Body
+
 		body = strings.Replace(body, "$title", msg.Title, -1)
 		body = strings.Replace(body, "$message", msg.Message, -1)
-		log.Printf("webhook body : %s", body)
+		slog.Info("webhook body ", slog.Any("body", body))
 		payload := strings.NewReader(body)
 		req, err := http.NewRequest(webhook.Method, webhook.Url, payload)
 		if err != nil {
-			log.Printf("NewRequest error : %v ", err)
-			break
+			slog.Error("NewRequest error", slog.Any("webhook", webhook), slog.Any("err", err))
+			continue
 		}
 		for k, v := range webhook.Header {
 			req.Header.Add(k, v)
 		}
 		res, err := http.DefaultClient.Do(req)
 		if err != nil {
-			log.Printf("Do request error : %v ", err)
-			break
+			slog.Error("Do request error", slog.Any("webhook", webhook), slog.Any("err", err))
+			continue
 		}
-		defer res.Body.Close()
-		log.Printf("webhook response : %v ", res)
+		slog.Info("webhook response", slog.Any("webhook", webhook), slog.Any("res", res))
 	}
 
 	return nil
@@ -199,7 +213,7 @@ func (p *MultiNotifierPlugin) ReceiveMessages(serverUrl string) {
 
 	err := p.receiveMessages(serverUrl)
 	if err != nil {
-		log.Println("read message error, retry after 1s")
+		slog.Error("read message error, retry after 1s", slog.Any("err", err))
 	}
 }
 
@@ -208,30 +222,30 @@ func (p *MultiNotifierPlugin) receiveMessages(serverUrl string) (err error) {
 	signal.Notify(interrupt, os.Interrupt)
 	conn, _, err := websocket.DefaultDialer.Dial(serverUrl, nil)
 	if err != nil {
-		log.Println("Dial error : ", err)
+		slog.Error("Dial error", slog.Any("err", err), slog.Any("serverUrl", serverUrl))
 		return err
 	}
-	log.Printf("Connected to %s", serverUrl)
+	slog.Info("Connected to " + serverUrl)
 	defer conn.Close()
 	msg := plugin.Message{}
 	go func() {
 		for {
 			_, message, err := conn.ReadMessage()
 			if err != nil {
-				log.Println("Websocket read message error :", err)
+				slog.Error("Websocket read message error", slog.Any("err", err))
 				return
 			}
 			if message[0] == '{' {
 				if err := json.Unmarshal(message, &msg); err != nil {
-					log.Println("Json Unmarshal error :", err)
+					slog.Error("Json Unmarshal error", slog.Any("err", err))
 					continue
 				}
 				err = p.SendMessage(msg, p.config.WebHooks)
 				if err != nil {
-					log.Printf("Email error : %v ", err)
+					slog.Error("SendMessage error", slog.Any("err", err))
 				}
 			} else {
-				log.Println("unsupported message format")
+				slog.Warn("unsupported message format", slog.Any("message", string(message)))
 			}
 		}
 	}()
@@ -242,20 +256,20 @@ func (p *MultiNotifierPlugin) receiveMessages(serverUrl string) (err error) {
 	for {
 		select {
 		case <-p.done:
-			log.Println("plugin stopped")
+			slog.Info("plugin stopped")
 			return
 		case t := <-ticker.C:
 			err := conn.WriteMessage(websocket.TextMessage, []byte(t.String()))
 			if err != nil {
-				log.Println("write:", err)
+				slog.Error("write text message error", slog.Any("err", err))
 				return err
 			}
 			ticker.Reset(time.Second)
 		case <-interrupt:
-			log.Println("plugin interrupt")
+			slog.Info("plugin interrupt")
 			err := conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
 			if err != nil {
-				log.Println("write close:", err)
+				slog.Error("write close message error", slog.Any("err", err))
 				return err
 			}
 			_ = conn.Close()
