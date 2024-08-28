@@ -27,6 +27,16 @@ func GetGotifyPluginInfo() plugin.Info {
 	}
 }
 
+type MessageExternal struct {
+	ID            uint                   `json:"id"`
+	ApplicationID uint                   `json:"appid"`
+	Message       string                 `form:"message" query:"message" json:"message" binding:"required"`
+	Title         string                 `form:"title" query:"title" json:"title"`
+	Priority      int                    `form:"priority" query:"priority" json:"priority"`
+	Extras        map[string]interface{} `form:"-" query:"-" json:"extras,omitempty"`
+	Date          time.Time              `json:"date"`
+}
+
 // EchoPlugin is the gotify plugin instance.
 type MultiNotifierPlugin struct {
 	msgHandler     plugin.MessageHandler
@@ -154,7 +164,7 @@ func (p *MultiNotifierPlugin) GetDisplay(location *url.URL) string {
 	return message
 }
 
-func (p *MultiNotifierPlugin) SendMessage(msg plugin.Message, webhooks []*WebHook) (err error) {
+func (p *MultiNotifierPlugin) SendMessage(msg *MessageExternal, webhooks []*WebHook) (err error) {
 	var msgTag = ""
 	var msgType = ""
 	if val, ok := msg.Extras["tag"]; ok {
@@ -176,13 +186,24 @@ func (p *MultiNotifierPlugin) SendMessage(msg plugin.Message, webhooks []*WebHoo
 		body := webhook.Body.Text
 		switch msgType {
 		case "text":
-			body = webhook.Body.Text
+			if webhook.Body.Text != "" {
+				body = webhook.Body.Text
+			}
 		case "image":
-			body = webhook.Body.Image
+			if webhook.Body.Image != "" {
+				body = webhook.Body.Image
+			}
 		case "file":
-			body = webhook.Body.File
+			if webhook.Body.File != "" {
+				body = webhook.Body.File
+			}
 		default:
 			slog.Warn("msg type dont match , skip", slog.Any("msgType", msgType), slog.Any("webhookType", webhook.Tags))
+			continue
+		}
+		if body == "" {
+			slog.Error("webhook body is empty, skip", slog.Any("webhook", webhook))
+			continue
 		}
 
 		body = strings.Replace(body, "$title", msg.Title, -1)
@@ -202,7 +223,7 @@ func (p *MultiNotifierPlugin) SendMessage(msg plugin.Message, webhooks []*WebHoo
 			slog.Error("Do request error", slog.Any("webhook", webhook), slog.Any("err", err))
 			continue
 		}
-		slog.Info("webhook response", slog.Any("webhook", webhook), slog.Any("res", res))
+		slog.Info("webhook response", slog.Any("webhook", webhook), slog.Any("res", res), slog.Any("msg", msg))
 	}
 
 	return nil
@@ -227,7 +248,6 @@ func (p *MultiNotifierPlugin) receiveMessages(serverUrl string) (err error) {
 	}
 	slog.Info("Connected to " + serverUrl)
 	defer conn.Close()
-	msg := plugin.Message{}
 	go func() {
 		for {
 			_, message, err := conn.ReadMessage()
@@ -236,7 +256,8 @@ func (p *MultiNotifierPlugin) receiveMessages(serverUrl string) (err error) {
 				return
 			}
 			if message[0] == '{' {
-				if err := json.Unmarshal(message, &msg); err != nil {
+				msg := &MessageExternal{}
+				if err := json.Unmarshal(message, msg); err != nil {
 					slog.Error("Json Unmarshal error", slog.Any("err", err))
 					continue
 				}
