@@ -199,7 +199,6 @@ func (p *MultiNotifierPlugin) SendMessage(msg *MessageExternal, webhooks []*WebH
 			}
 		default:
 			slog.Warn("msg type dont match , skip", slog.Any("msgType", msgType), slog.Any("webhookType", webhook.Tags))
-			continue
 		}
 		if body == "" {
 			slog.Error("webhook body is empty, skip", slog.Any("webhook", webhook))
