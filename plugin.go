@@ -1,15 +1,17 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/url"
-	"os"
-	"os/signal"
-	"slices"
 	"strings"
+	"sync"
+	"text/template"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -42,16 +44,7 @@ type MultiNotifierPlugin struct {
 	msgHandler     plugin.MessageHandler
 	storageHandler plugin.StorageHandler
 	config         *Config
-	done           chan struct{}
-}
-
-func (p *MultiNotifierPlugin) TestSocket(serverUrl string) (err error) {
-	_, _, err = websocket.DefaultDialer.Dial(serverUrl, nil)
-	if err != nil {
-		slog.Error("Test dial error :", slog.Any("error", err), slog.Any("url", serverUrl))
-		return err
-	}
-	return nil
+	cancel         context.CancelFunc
 }
 
 // Enable enables the plugin.
@@ -59,18 +52,45 @@ func (p *MultiNotifierPlugin) Enable() error {
 	if len(p.config.HostServer) < 1 {
 		return errors.New("please enter the correct web server")
 	}
-	p.done = make(chan struct{})
-	slog.Info("webhook plugin enabled", slog.Any("config", GetGotifyPluginInfo()))
-	serverUrl := p.config.HostServer + "/stream?token=" + p.config.ClientToken
-	slog.Info("Websocket url :" + serverUrl)
-	go p.ReceiveMessages(serverUrl)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	p.cancel = cancel
+
+	serverUrl := p.config.HostServer + "/stream"
+
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				slog.Info("Plugin stopped")
+				return
+			default:
+				err := p.receiveMessages(ctx, serverUrl)
+				if err != nil {
+					if errors.Is(err, context.Canceled) {
+						slog.Info("ReceiveMessages canceled")
+						return
+					}
+					slog.Error("Read message error, retrying after 1s", slog.Any("err", err))
+					time.Sleep(time.Second)
+				} else {
+					return
+				}
+			}
+		}
+	}()
+
+	slog.Info("Webhook plugin enabled", slog.Any("config", GetGotifyPluginInfo()))
+
 	return nil
 }
 
 // Disable disables the plugin.
 func (p *MultiNotifierPlugin) Disable() error {
-	slog.Info("webhook plugin disbled", slog.Any("config", GetGotifyPluginInfo()))
-	close(p.done)
+	if p.cancel != nil {
+		p.cancel()
+	}
+	slog.Info("Webhook plugin disbled", slog.Any("config", GetGotifyPluginInfo()))
 	return nil
 }
 
@@ -89,18 +109,12 @@ type Storage struct {
 	CalledTimes int `json:"called_times"`
 }
 
-type Body struct {
-	Text  string `json:"text"`
-	Image string `json:"image"`
-	File  string `json:"file"`
-}
-
 type WebHook struct {
 	Url    string            `yaml:"url"`
 	Method string            `yaml:"method"`
-	Body   *Body             `yaml:"body"`
+	Body   string            `yaml:"body"`
 	Header map[string]string `yaml:"header"`
-	Tags   []string          `yaml:"tags"`
+	Apps   []uint            `yaml:"apps"`
 }
 
 // Config defines the plugin config scheme
@@ -122,150 +136,99 @@ func (p *MultiNotifierPlugin) DefaultConfig() interface{} {
 // ValidateAndSetConfig implements plugin.Configurer
 func (p *MultiNotifierPlugin) ValidateAndSetConfig(config interface{}) error {
 	p.config = config.(*Config)
-	for i, webhook := range p.config.WebHooks {
+	validWebhooks := make([]*WebHook, 0)
+
+	for _, webhook := range p.config.WebHooks {
 		if webhook.Method == "" {
 			webhook.Method = "POST"
 		}
-		if webhook.Url == "" {
-			slog.Warn("webhook url is empty", slog.Any("webhook", webhook))
-			p.config.WebHooks = append(p.config.WebHooks[:i], p.config.WebHooks[i+1:]...)
+
+		parsedURL, err := url.Parse(webhook.Url)
+		if err != nil || parsedURL.Scheme == "" || parsedURL.Host == "" {
+			return fmt.Errorf("invalid webhook URL: %s", webhook.Url)
 		}
-		if webhook.Body == nil {
-			slog.Warn("webhook body is invalid", slog.Any("webhook", webhook))
-			p.config.WebHooks = append(p.config.WebHooks[:i], p.config.WebHooks[i+1:]...)
+
+		if _, exists := webhook.Header["Content-Type"]; !exists {
+			if webhook.Header == nil {
+				webhook.Header = make(map[string]string)
+			}
+			webhook.Header["Content-Type"] = "text/plain"
 		}
+
+		validWebhooks = append(validWebhooks, webhook)
 	}
+
+	p.config.WebHooks = validWebhooks
+
 	return nil
 }
 
 // GetDisplay implements plugin.Displayer.
 func (p *MultiNotifierPlugin) GetDisplay(location *url.URL) string {
 	message := `
-	如何填写配置：
+	Guide:
 
-	1. 创建一个新的 Client，获取 token，更新配置中的 client_token
-	2. 修改 gotify 服务器地址，默认为 ws://localhost
-	3. 填写需要接受通知的 webhook 配置
+	1. Create a new client and put its token into the client_token option.
+	2. Update the host_server option if it is different with the default 'ws://localhost'.
+	3. Configurate webhooks.
 
-	webhook 示例:
+	Webhook example:
+
 	web_hooks: 
+	  - url: http://example.com/api/messages
+	    body: "{{.title}}\n\n{{.message}}"
 	  - url: http://192.168.1.2:10201/api/sendTextMsg	
-		method: POST
-		body: 
-		  text: "{\"wxid\":\"xxxxxxxx\",\"msg\":\"$title\n$message\"}"
-	  - url: "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxxxxx"
-		method: "POST"
-		body: 
-		  text: "{\"msgtype\":\"text\",\"text\":{\"content\":\"$title\n$message\"}}"
-		  image: "$message"
+	    apps:
+	      - 1
+	    method: POST
+	    header:
+	      Content-Type: application/json
+	    body: "{\"wxid\":\"xxxxxxxx\",\"msg\":\"{{.title}}\n{{.message}}\"}"
 
-	注：请在更改后重新启用插件。
+	Note: Re-enable the plugin after making changes.
 	`
 	return message
 }
 
-func (p *MultiNotifierPlugin) SendMessage(msg *MessageExternal, webhooks []*WebHook) (err error) {
-	var msgTag = ""
-	var msgType = ""
-	if val, ok := msg.Extras["tag"]; ok {
-		msgTag = val.(string)
-	}
-	if val, ok := msg.Extras["type"]; ok {
-		msgType = val.(string)
-	}
-	for _, webhook := range webhooks {
-		if len(webhook.Tags) > 0 {
-			if msgTag != "" && !slices.Contains(webhook.Tags, msgTag) {
-				slog.Warn("webhook dont match tag, skip", slog.Any("msgTag", msgTag), slog.Any("webhookTag", webhook.Tags))
-				continue
-			}
-		} else if msgTag != "" {
-			slog.Warn("msg tag dont match , skip", slog.Any("msgTag", msgTag), slog.Any("webhookTag", webhook.Tags))
-			continue
-		}
-		body := webhook.Body.Text
-		switch msgType {
-		case "text":
-			if webhook.Body.Text != "" {
-				body = webhook.Body.Text
-			}
-		case "image":
-			if webhook.Body.Image != "" {
-				body = webhook.Body.Image
-			}
-		case "file":
-			if webhook.Body.File != "" {
-				body = webhook.Body.File
-			}
-		default:
-			slog.Warn("msg type dont match , skip", slog.Any("msgType", msgType), slog.Any("webhookType", webhook.Tags))
-		}
-		if body == "" {
-			slog.Error("webhook body is empty, skip", slog.Any("webhook", webhook))
-			continue
-		}
-
-		body = strings.Replace(body, "$title", msg.Title, -1)
-		body = strings.Replace(body, "$message", msg.Message, -1)
-		slog.Info("webhook body ", slog.Any("body", body))
-		payload := strings.NewReader(body)
-		req, err := http.NewRequest(webhook.Method, webhook.Url, payload)
-		if err != nil {
-			slog.Error("NewRequest error", slog.Any("webhook", webhook), slog.Any("err", err))
-			continue
-		}
-		for k, v := range webhook.Header {
-			req.Header.Add(k, v)
-		}
-		res, err := http.DefaultClient.Do(req)
-		if err != nil {
-			slog.Error("Do request error", slog.Any("webhook", webhook), slog.Any("err", err))
-			continue
-		}
-		slog.Info("webhook response", slog.Any("webhook", webhook), slog.Any("res", res), slog.Any("msg", msg))
-	}
-
-	return nil
-}
-
-func (p *MultiNotifierPlugin) ReceiveMessages(serverUrl string) {
-	time.Sleep(1 * time.Second)
-
-	err := p.receiveMessages(serverUrl)
+func (p *MultiNotifierPlugin) receiveMessages(ctx context.Context, serverUrl string) (err error) {
+	header := http.Header{}
+	header.Add("Authorization", "Bearer "+p.config.ClientToken)
+	conn, _, err := websocket.DefaultDialer.Dial(serverUrl, header)
 	if err != nil {
-		slog.Error("read message error, retry after 1s", slog.Any("err", err))
+		return fmt.Errorf("dial error: %w", err)
 	}
-}
-
-func (p *MultiNotifierPlugin) receiveMessages(serverUrl string) (err error) {
-	interrupt := make(chan os.Signal, 1)
-	signal.Notify(interrupt, os.Interrupt)
-	conn, _, err := websocket.DefaultDialer.Dial(serverUrl, nil)
-	if err != nil {
-		slog.Error("Dial error", slog.Any("err", err), slog.Any("serverUrl", serverUrl))
-		return err
-	}
-	slog.Info("Connected to " + serverUrl)
 	defer conn.Close()
+
+	slog.Info("Connected to Websocket server", slog.String("url", serverUrl))
+
+	readErrCh := make(chan error, 1)
+
 	go func() {
+		defer close(readErrCh)
 		for {
-			_, message, err := conn.ReadMessage()
-			if err != nil {
-				slog.Error("Websocket read message error", slog.Any("err", err))
+			select {
+			case <-ctx.Done():
+				readErrCh <- ctx.Err()
 				return
-			}
-			if message[0] == '{' {
+			default:
+				_, message, err := conn.ReadMessage()
+				if err != nil {
+					readErrCh <- fmt.Errorf("read message error: %w", err)
+					return
+				}
+
 				msg := &MessageExternal{}
 				if err := json.Unmarshal(message, msg); err != nil {
-					slog.Error("Json Unmarshal error", slog.Any("err", err))
+					slog.Warn("Unsupported message format", slog.Any("message", string(message)))
 					continue
 				}
-				err = p.SendMessage(msg, p.config.WebHooks)
-				if err != nil {
-					slog.Error("SendMessage error", slog.Any("err", err))
+
+				errs := p.sendMessage(ctx, msg, p.config.WebHooks)
+				if len(errs) > 0 {
+					for _, err := range errs {
+						slog.Error("Failed to send message", slog.Any("error", err))
+					}
 				}
-			} else {
-				slog.Warn("unsupported message format", slog.Any("message", string(message)))
 			}
 		}
 	}()
@@ -275,27 +238,171 @@ func (p *MultiNotifierPlugin) receiveMessages(serverUrl string) (err error) {
 
 	for {
 		select {
-		case <-p.done:
-			slog.Info("plugin stopped")
-			return
+		case <-ctx.Done():
+			slog.Info("Context cancelled, closing WebSocket connection")
+			err := conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
+			if err != nil {
+				return fmt.Errorf("write close message error: %w", err)
+			}
+			return nil
+		case err := <-readErrCh:
+			return err
 		case t := <-ticker.C:
 			err := conn.WriteMessage(websocket.TextMessage, []byte(t.String()))
 			if err != nil {
-				slog.Error("write text message error", slog.Any("err", err))
-				return err
+				return fmt.Errorf("write heartbeat message error: %w", err)
 			}
 			ticker.Reset(time.Second)
-		case <-interrupt:
-			slog.Info("plugin interrupt")
-			err := conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
-			if err != nil {
-				slog.Error("write close message error", slog.Any("err", err))
-				return err
+		}
+	}
+}
+
+func (p *MultiNotifierPlugin) sendMessage(ctx context.Context, msg *MessageExternal, webhooks []*WebHook) (errors []error) {
+	var (
+		mu sync.Mutex
+		wg sync.WaitGroup
+	)
+
+	for _, webhook := range webhooks {
+		webhook := webhook // Create local variable for closure, for golang 1.22 and older versions.
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+
+			if ctx.Err() != nil {
+				mu.Lock()
+				errors = append(errors, ctx.Err())
+				mu.Unlock()
+				return
 			}
-			_ = conn.Close()
+
+			// Only messages from white-listed applications can be forwarded.
+			if len(webhook.Apps) > 0 {
+				appAllowed := false
+				for _, appID := range webhook.Apps {
+					if appID == msg.ApplicationID {
+						appAllowed = true
+						break
+					}
+				}
+				if !appAllowed {
+					return
+				}
+			}
+
+			// Process the webhook body
+			body, err := p.processWebhookBody(webhook.Body, msg)
+			if err != nil {
+				err = fmt.Errorf("failed to process webhook body for %s: %w", webhook.Url, err)
+				mu.Lock()
+				errors = append(errors, err)
+				mu.Unlock()
+				return
+			}
+
+			// Send the HTTP request
+			err = p.sendHTTPRequest(ctx, webhook, body)
+			if err != nil {
+				err = fmt.Errorf("failed to send webhook request to %s: %w", webhook.Url, err)
+				mu.Lock()
+				errors = append(errors, err)
+				mu.Unlock()
+				return
+			}
+		}()
+	}
+
+	wg.Wait()
+
+	return errors
+}
+
+func (p *MultiNotifierPlugin) processWebhookBody(body string, msg *MessageExternal) (string, error) {
+	var jsonBody map[string]interface{}
+	isJSON := json.Unmarshal([]byte(body), &jsonBody) == nil
+
+	if isJSON {
+		// Process JSON structured template
+		err := processJSONRecursive(jsonBody, msg)
+		if err != nil {
+			return "", fmt.Errorf("failed to process JSON body: %w", err)
+		}
+
+		newBody, err := json.Marshal(jsonBody)
+		if err != nil {
+			return "", fmt.Errorf("failed to marshal body: %w", err)
+		}
+		return string(newBody), nil
+	} else {
+		// Process plain text template
+		return processTemplateString(body, msg)
+	}
+}
+
+func (p *MultiNotifierPlugin) sendHTTPRequest(ctx context.Context, webhook *WebHook, body string) error {
+	req, err := http.NewRequestWithContext(ctx, webhook.Method, webhook.Url, strings.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+
+	for k, v := range webhook.Header {
+		req.Header.Add(k, v)
+	}
+
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to send request: %w", err)
+	}
+	defer res.Body.Close()
+
+	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		return fmt.Errorf("unexpected status code: %d", res.StatusCode)
+	}
+
+	return nil
+}
+
+func processJSONRecursive(m map[string]interface{}, msg *MessageExternal) (err error) {
+	for k, v := range m {
+		switch vv := v.(type) {
+		case string:
+			m[k], err = processTemplateString(vv, msg)
+		case map[string]interface{}:
+			err = processJSONRecursive(vv, msg)
+		case []interface{}:
+			for i, item := range vv {
+				if itemString, ok := item.(string); ok {
+					vv[i], err = processTemplateString(itemString, msg)
+				} else if itemMap, ok := item.(map[string]interface{}); ok {
+					err = processJSONRecursive(itemMap, msg)
+				}
+			}
+		}
+
+		if err != nil {
 			return err
 		}
 	}
+
+	return nil
+}
+
+func processTemplateString(s string, msg *MessageExternal) (string, error) {
+	tmpl, err := template.New("").Parse(s)
+	if err != nil {
+		return "", fmt.Errorf("failed to parse template: %w", err)
+	}
+
+	var buf bytes.Buffer
+	err = tmpl.Execute(&buf, map[string]interface{}{
+		"title":   msg.Title,
+		"message": msg.Message,
+	})
+	if err != nil {
+		return "", fmt.Errorf("failed to execute template: %w", err)
+	}
+
+	return buf.String(), nil
 }
 
 // NewGotifyPluginInstance creates a plugin instance for a user context.
@@ -304,5 +411,5 @@ func NewGotifyPluginInstance(ctx plugin.UserContext) plugin.Plugin {
 }
 
 func main() {
-	panic("this should be built as go plugin")
+	panic("This should be built as a Go plugin.")
 }
