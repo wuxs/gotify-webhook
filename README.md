@@ -6,6 +6,7 @@ using [gotify/plugin-api](https://github.com/gotify/plugin-api).
 ## Getting Started
 
 1. Clone this repository.
+2. Download `gomod-cap` with `make download-tools` 
 1. Build plugin with `make GOTIFY_VERSION="v2.5.0" build`.
 1. Copy `build/webhook-linux-amd64.so` to the Gotify server plugin directory.
 1. Restart the Gotify server.
