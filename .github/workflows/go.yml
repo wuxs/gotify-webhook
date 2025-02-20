@@ -34,7 +34,7 @@ jobs:
       run: make GOTIFY_VERSION="v2.5.0" build
 
     - name: Archive build outputs
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: plugin-artifacts
         path: ./build
