@@ -23,9 +23,6 @@ jobs:
 
     - name: Download gomod-cap tool
       run: go install github.com/gotify/plugin-api/cmd/gomod-cap@latest
-
-    - name: Update Go modules
-      run: make update-go-mod
       
     - name: Build plugin
       run: make GOTIFY_VERSION="v2.5.0" build
